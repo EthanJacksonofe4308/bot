@@ -17,6 +17,7 @@ import time
 import json
 import base64
 import requests
+import yaml
 from datetime import datetime
 from urllib.parse import urlparse, unquote
 
@@ -213,51 +214,136 @@ def do_speedtest() -> dict:
         return {"ok": False, "error": str(e)}
 
 
-def decode_sub_link(url: str) -> list[dict]:
-    """Tải & giải mã sub link VPN (VMess/VLESS/SS/Trojan, Base64 hoặc plain)."""
+def _parse_clash_yaml(content: str) -> list[dict]:
+    """Parse Clash YAML format (proxies: [...])"""
+    proxies = []
     try:
-        r = requests.get(url, timeout=12, headers={"User-Agent": "ClashForWindows"})
+        data = yaml.safe_load(content)
+        if not isinstance(data, dict):
+            return []
+        clash_proxies = data.get("proxies") or data.get("Proxies") or []
+        for p in clash_proxies:
+            if not isinstance(p, dict):
+                continue
+            ptype = str(p.get("type", "?")).upper()
+            # Chuẩn hóa type
+            type_map = {
+                "SS": "SS", "SHADOWSOCKS": "SS",
+                "VMESS": "VMess", "VLESS": "VLESS",
+                "TROJAN": "Trojan", "HYSTERIA": "Hysteria",
+                "HYSTERIA2": "Hysteria2", "TUIC": "TUIC",
+                "SOCKS5": "SOCKS5", "HTTP": "HTTP",
+            }
+            ptype = type_map.get(ptype, ptype)
+            proxies.append({
+                "type":   ptype,
+                "name":   str(p.get("name", "?")),
+                "server": str(p.get("server", "?")),
+                "port":   p.get("port", 443),
+                "net":    str(p.get("network", p.get("net", "?"))),
+            })
+    except Exception:
+        pass
+    return proxies
+
+
+def _parse_v2ray_lines(content: str) -> list[dict]:
+    """Parse V2Ray plain/base64 lines (vmess:// vless:// ss:// trojan://)"""
+    proxies = []
+    for line in content.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("vmess://"):
+            try:
+                d = json.loads(base64.b64decode(line[8:] + "==").decode("utf-8", errors="ignore"))
+                proxies.append({
+                    "type": "VMess", "name": d.get("ps", "vmess"),
+                    "server": d.get("add", "?"), "port": d.get("port", 443),
+                    "net": d.get("net", "tcp"),
+                })
+            except Exception:
+                pass
+        elif line.startswith("vless://"):
+            p = urlparse(line)
+            proxies.append({
+                "type": "VLESS", "name": unquote(p.fragment or p.hostname or "vless"),
+                "server": p.hostname or "?", "port": p.port or 443, "net": "?",
+            })
+        elif line.startswith("ss://"):
+            p = urlparse(line)
+            proxies.append({
+                "type": "SS", "name": unquote(p.fragment or p.hostname or "ss"),
+                "server": p.hostname or "?", "port": p.port or 443, "net": "?",
+            })
+        elif line.startswith("trojan://"):
+            p = urlparse(line)
+            proxies.append({
+                "type": "Trojan", "name": unquote(p.fragment or p.hostname or "trojan"),
+                "server": p.hostname or "?", "port": p.port or 443, "net": "?",
+            })
+        elif line.startswith("hysteria2://") or line.startswith("hy2://"):
+            p = urlparse(line)
+            proxies.append({
+                "type": "Hysteria2", "name": unquote(p.fragment or p.hostname or "hy2"),
+                "server": p.hostname or "?", "port": p.port or 443, "net": "udp",
+            })
+        elif line.startswith("hysteria://"):
+            p = urlparse(line)
+            proxies.append({
+                "type": "Hysteria", "name": unquote(p.fragment or p.hostname or "hysteria"),
+                "server": p.hostname or "?", "port": p.port or 443, "net": "udp",
+            })
+        elif line.startswith("tuic://"):
+            p = urlparse(line)
+            proxies.append({
+                "type": "TUIC", "name": unquote(p.fragment or p.hostname or "tuic"),
+                "server": p.hostname or "?", "port": p.port or 443, "net": "udp",
+            })
+    return proxies
+
+
+def decode_sub_link(url: str) -> list[dict]:
+    """
+    Tải & giải mã sub link VPN.
+    Hỗ trợ: Clash YAML, VMess, VLESS, SS, Trojan, Hysteria2, TUIC (Base64 hoặc plain)
+    """
+    try:
+        headers = {
+            "User-Agent": "ClashForWindows/0.20.39",
+            "Accept": "*/*",
+        }
+        r = requests.get(url, timeout=12, headers=headers)
         r.raise_for_status()
         content = r.text.strip()
+
+        # 1. Thử parse Clash YAML trước (có chữ "proxies:")
+        if "proxies:" in content or "Proxies:" in content:
+            proxies = _parse_clash_yaml(content)
+            if proxies:
+                return proxies
+
+        # 2. Thử decode Base64 rồi parse lại
         try:
-            content = base64.b64decode(content + "==").decode("utf-8", errors="ignore")
+            decoded = base64.b64decode(content + "==").decode("utf-8", errors="ignore")
+            # Kiểm tra decoded có phải Clash YAML không
+            if "proxies:" in decoded or "Proxies:" in decoded:
+                proxies = _parse_clash_yaml(decoded)
+                if proxies:
+                    return proxies
+            # Thử parse V2Ray lines từ decoded
+            proxies = _parse_v2ray_lines(decoded)
+            if proxies:
+                return proxies
         except Exception:
             pass
 
-        proxies = []
-        for line in content.strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("vmess://"):
-                try:
-                    d = json.loads(base64.b64decode(line[8:] + "==").decode("utf-8", errors="ignore"))
-                    proxies.append({
-                        "type": "VMess", "name": d.get("ps", "vmess"),
-                        "server": d.get("add", "?"), "port": d.get("port", 443),
-                        "net": d.get("net", "tcp"),
-                    })
-                except Exception:
-                    pass
-            elif line.startswith("vless://"):
-                p = urlparse(line)
-                proxies.append({
-                    "type": "VLESS", "name": unquote(p.fragment or p.hostname or "vless"),
-                    "server": p.hostname or "?", "port": p.port or 443, "net": "?",
-                })
-            elif line.startswith("ss://"):
-                p = urlparse(line)
-                proxies.append({
-                    "type": "SS", "name": unquote(p.fragment or p.hostname or "ss"),
-                    "server": p.hostname or "?", "port": p.port or 443, "net": "?",
-                })
-            elif line.startswith("trojan://"):
-                p = urlparse(line)
-                proxies.append({
-                    "type": "Trojan", "name": unquote(p.fragment or p.hostname or "trojan"),
-                    "server": p.hostname or "?", "port": p.port or 443, "net": "?",
-                })
-        return proxies or [{"error": "Không tìm thấy proxy nào trong sub link này."}]
+        # 3. Thử parse V2Ray lines từ content gốc
+        proxies = _parse_v2ray_lines(content)
+        if proxies:
+            return proxies
+
+        return [{"error": "Không tìm thấy proxy nào. Sub link có thể dùng định dạng khác hoặc đã hết hạn."}]
     except Exception as e:
         return [{"error": str(e)}]
 
@@ -421,15 +507,171 @@ def kb_sub_list(uid: int):
 # ==================== COMMAND HANDLERS ====================
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "👋 *Bot Kiểm Tra VPN Trung Quốc*\n\n"
-        "🔍 Kiểm tra VPN & site bị GFW chặn\n"
-        "🌐 IP công khai & vị trí\n"
-        "🏓 Ping host bất kỳ hoặc toàn bộ node sub\n"
-        "⚡ Đo tốc độ Download / Upload\n"
-        f"🔗 Quản lý Sub Link VPN (fetch mới nhất mỗi khi dùng)\n"
-    )
+    uid  = update.effective_user.id
+    subs = user_subs.get(uid, [])
+    text = "👋 *Bot Kiểm Tra VPN Trung Quốc*\n\n"
+    text += "*Lệnh sub link:*\n"
+    text += "`/new <tên> <url>` — Thêm sub link\n"
+    text += "`/remove <số>` — Xóa sub link\n"
+    text += "`/view <số>` — Xem server trong sub\n"
+    text += "`/ping <số>` — Ping tất cả node sub\n\n"
+    text += "*Lệnh khác:*\n"
+    text += "`/check` — Kiểm tra VPN & GFW\n"
+    text += "`/ip` — Xem IP công khai\n"
+    text += "`/speed` — Đo tốc độ mạng\n\n"
+    if subs:
+        text += f"*Sub link của bạn ({len(subs)}/{MAX_SUBS}):*\n"
+        for i, s in enumerate(subs, 1):
+            text += f"  `{i}.` *{s['name']}* — `{len(s.get('proxies',[]))}` proxy\n"
+    else:
+        text += "_Chưa có sub link nào. Dùng /new để thêm._"
     await update.message.reply_text(text, reply_markup=kb_main(), parse_mode="Markdown")
+
+
+async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/new <tên> <url>  hoặc  /new <url>"""
+    uid  = update.effective_user.id
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "❌ Cú pháp: `/new <tên> <url>`\nVí dụ: `/new vpnstore https://example.com/sub/abc`",
+            parse_mode="Markdown"
+        )
+        return
+    if len(user_subs.get(uid, [])) >= MAX_SUBS:
+        await update.message.reply_text(f"❌ Đã đạt giới hạn {MAX_SUBS} sub link!")
+        return
+
+    # Tìm URL trong args
+    url_idx = next((i for i, a in enumerate(args) if a.startswith("http")), -1)
+    if url_idx < 0:
+        await update.message.reply_text("❌ Không tìm thấy URL hợp lệ (phải bắt đầu http/https).", parse_mode="Markdown")
+        return
+
+    url  = args[url_idx]
+    name = " ".join(args[:url_idx]).strip().rstrip("|").strip()
+    if not name:
+        name = f"Sub {len(user_subs.get(uid, [])) + 1}"
+
+    msg = await update.message.reply_text(f"⏳ Đang tải sub link *{name}*...", parse_mode="Markdown")
+    proxies = await asyncio.get_event_loop().run_in_executor(None, decode_sub_link, url)
+    if proxies and "error" in proxies[0]:
+        await msg.edit_text(f"❌ Lỗi: `{proxies[0]['error']}`", parse_mode="Markdown")
+        return
+    if uid not in user_subs:
+        user_subs[uid] = []
+    user_subs[uid].append({
+        "name": name, "url": url, "proxies": proxies,
+        "updated_at": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+    })
+    idx = len(user_subs[uid]) - 1
+    lines = [f"  • [{p.get('type','?')}] `{p.get('name','?')}`" for p in proxies[:12]]
+    if len(proxies) > 12:
+        lines.append(f"  _... và {len(proxies)-12} proxy khác_")
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"🏓 Ping nodes", callback_data=f"sub_ping_{idx}"),
+        InlineKeyboardButton(f"📋 Xem server", callback_data=f"sub_view_{idx}"),
+    ]])
+    await msg.edit_text(
+        f"✅ *Đã thêm: {name}*\nTổng `{len(proxies)}` proxy\n\n" + "\n".join(lines),
+        parse_mode="Markdown", reply_markup=kb,
+    )
+
+
+async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/remove <số>"""
+    uid  = update.effective_user.id
+    subs = user_subs.get(uid, [])
+    if not context.args:
+        await update.message.reply_text("❌ Cú pháp: `/remove <số>`\nVí dụ: `/remove 1`", parse_mode="Markdown")
+        return
+    try:
+        idx     = int(context.args[0]) - 1
+        removed = subs.pop(idx)
+        text = f"🗑️ Đã xóa sub: *{removed['name']}*\n\n"
+        if subs:
+            text += f"*Còn lại ({len(subs)}/{MAX_SUBS}):*\n"
+            for i, s in enumerate(subs, 1):
+                text += f"  `{i}.` *{s['name']}*\n"
+        else:
+            text += "_Danh sách sub trống._"
+        await update.message.reply_text(text, parse_mode="Markdown")
+    except (IndexError, ValueError):
+        subs_list = "\n".join([f"  `{i}.` *{s['name']}*" for i, s in enumerate(subs, 1)]) or "_Trống_"
+        await update.message.reply_text(
+            f"❌ Số thứ tự không hợp lệ!\n\nDanh sách hiện tại:\n{subs_list}",
+            parse_mode="Markdown"
+        )
+
+
+async def cmd_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/view <số> — Fetch lại sub rồi hiện danh sách server"""
+    uid  = update.effective_user.id
+    subs = user_subs.get(uid, [])
+    if not context.args:
+        await update.message.reply_text("❌ Cú pháp: `/view <số>`\nVí dụ: `/view 1`", parse_mode="Markdown")
+        return
+    try:
+        idx = int(context.args[0]) - 1
+        s   = subs[idx]
+    except (IndexError, ValueError):
+        subs_list = "\n".join([f"  `{i}.` *{s['name']}*" for i, s in enumerate(subs, 1)]) or "_Trống_"
+        await update.message.reply_text(
+            f"❌ Không tìm thấy sub #{context.args[0]}\n\nDanh sách:\n{subs_list}",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Luôn fetch lại sub để lấy server mới nhất
+    msg = await update.message.reply_text(
+        f"🔄 Đang fetch sub *{s['name']}* để lấy server mới nhất...", parse_mode="Markdown"
+    )
+    subs[idx] = await asyncio.get_event_loop().run_in_executor(None, fetch_sub_fresh, s)
+    s       = subs[idx]
+    proxies = s.get("proxies", [])
+
+    if not proxies or "error" in proxies[0]:
+        await msg.edit_text(f"❌ Lỗi fetch sub: `{proxies[0].get('error','?')}`", parse_mode="Markdown")
+        return
+
+    lines = [
+        f"  `{i}.` [{p.get('type','?')}] `{p.get('name','?')}` — `{p.get('server','?')}:{p.get('port','?')}`"
+        for i, p in enumerate(proxies[:25], 1)
+    ]
+    if len(proxies) > 25:
+        lines.append(f"  _... và {len(proxies)-25} server khác_")
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🏓 Ping tất cả node", callback_data=f"sub_ping_{idx}"),
+    ]])
+    await msg.edit_text(
+        f"📋 *{s['name']}*\n"
+        f"Tổng: `{len(proxies)}` server | Fetch: `{s.get('updated_at','?')}`\n"
+        f"_✅ Danh sách vừa được tải mới nhất từ link sub_\n\n"
+        + "\n".join(lines),
+        parse_mode="Markdown", reply_markup=kb,
+    )
+
+
+async def cmd_ping_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/ping <số> — Fetch lại sub rồi ping tất cả node"""
+    uid  = update.effective_user.id
+    subs = user_subs.get(uid, [])
+    if not context.args:
+        await update.message.reply_text("❌ Cú pháp: `/ping <số>`\nVí dụ: `/ping 1`", parse_mode="Markdown")
+        return
+    try:
+        idx = int(context.args[0]) - 1
+        s   = subs[idx]
+    except (IndexError, ValueError):
+        subs_list = "\n".join([f"  `{i}.` *{s['name']}*" for i, s in enumerate(subs, 1)]) or "_Trống_"
+        await update.message.reply_text(
+            f"❌ Không tìm thấy sub #{context.args[0]}\n\nDanh sách:\n{subs_list}",
+            parse_mode="Markdown"
+        )
+        return
+
+    await _exec_ping_nodes(update.message, s, idx)
 
 
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -440,7 +682,7 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_ip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔍 Đang lấy thông tin IP...")
-    ip = await asyncio.get_event_loop().run_in_executor(None, get_public_ip)
+    ip  = await asyncio.get_event_loop().run_in_executor(None, get_public_ip)
     text = (
         f"📍 *THÔNG TIN IP CỦA BẠN*\n━━━━━━━━━━━━━━━━\n"
         f"🔹 IP: `{ip['ip']}`\n🔹 Quốc gia: `{ip['country']}`\n"
@@ -451,33 +693,6 @@ async def cmd_ip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(text, parse_mode="Markdown", reply_markup=kb_back())
 
 
-async def cmd_ping_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.args:
-        await _exec_ping(update.message, context.args[0])
-        return ConversationHandler.END
-    await update.message.reply_text(
-        "🏓 *Nhập host/IP để ping:*\n"
-        "_Ví dụ: `google.com` | `8.8.8.8` | `1.2.3.4:443`_\n\n"
-        "Gõ /cancel để hủy.",
-        parse_mode="Markdown",
-    )
-    return WAITING_PING_HOST
-
-
-async def cmd_ping_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _exec_ping(update.message, update.message.text.strip())
-    return ConversationHandler.END
-
-
-async def _exec_ping(message, host: str):
-    msg = await message.reply_text(f"🏓 Đang ping `{host}`...", parse_mode="Markdown")
-    result = await asyncio.get_event_loop().run_in_executor(None, do_ping_host, host)
-    await msg.edit_text(
-        fmt_ping_single(result), parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="back_start")]]),
-    )
-
-
 async def cmd_speed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(
         "⚡ *Đang đo tốc độ...*\n_Mất khoảng 30–60 giây, vui lòng chờ._", parse_mode="Markdown"
@@ -486,171 +701,44 @@ async def cmd_speed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(fmt_speed(result), parse_mode="Markdown", reply_markup=kb_recheck("menu_speed"))
 
 
-async def cmd_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /sub              → Xem danh sách (menu nút bấm)
-    /sub add Tên | URL → Thêm sub link
-    /sub del <số>     → Xóa sub link
-    /sub view <số>    → Xem proxy trong sub link
-    /sub ping <số>    → Ping tất cả node trong sub
-    /sub update <số>  → Cập nhật sub link
-    """
-    uid  = update.effective_user.id
-    args = context.args
-
-    if not args:
-        await _show_sub_menu(update.message, uid)
-        return
-
-    cmd_str = args[0].lower()
-
-    # --- ADD ---
-    if cmd_str == "add":
-        full = " ".join(args[1:])
-        if len(user_subs.get(uid, [])) >= MAX_SUBS:
-            await update.message.reply_text(f"❌ Đã đạt giới hạn {MAX_SUBS} sub link!")
-            return
-        if "|" in full:
-            parts = full.split("|", 1)
-            name, url = parts[0].strip(), parts[1].strip()
-        else:
-            url = full.strip()
-            name = f"Sub {len(user_subs.get(uid, [])) + 1}"
-        if not url.startswith("http"):
-            await update.message.reply_text("❌ URL không hợp lệ!")
-            return
-        msg = await update.message.reply_text(f"⏳ Đang tải sub link `{name}`...", parse_mode="Markdown")
-        proxies = await asyncio.get_event_loop().run_in_executor(None, decode_sub_link, url)
-        if proxies and "error" in proxies[0]:
-            await msg.edit_text(f"❌ Lỗi: `{proxies[0]['error']}`", parse_mode="Markdown")
-            return
-        if uid not in user_subs:
-            user_subs[uid] = []
-        user_subs[uid].append({
-            "name": name, "url": url, "proxies": proxies,
-            "updated_at": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-        })
-        lines = [f"  • [{p.get('type','?')}] `{p.get('name','?')}`" for p in proxies[:12]]
-        if len(proxies) > 12:
-            lines.append(f"  _... và {len(proxies)-12} proxy khác_")
-        await msg.edit_text(
-            f"✅ *Đã thêm: {name}*\nTổng `{len(proxies)}` proxy\n\n" + "\n".join(lines),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📋 Danh sách sub", callback_data="menu_sub")]]),
-        )
-
-    # --- DEL ---
-    elif cmd_str == "del":
-        subs = user_subs.get(uid, [])
-        try:
-            idx = int(args[1]) - 1
-            removed = subs.pop(idx)
-            await update.message.reply_text(f"🗑️ Đã xóa: *{removed['name']}*", parse_mode="Markdown")
-        except Exception:
-            await update.message.reply_text("❌ Cú pháp: `/sub del <số thứ tự>`", parse_mode="Markdown")
-
-    # --- VIEW ---
-    elif cmd_str == "view":
-        subs = user_subs.get(uid, [])
-        try:
-            idx = int(args[1]) - 1
-            s = subs[idx]
-            proxies = s.get("proxies", [])
-            lines = [
-                f"  • [{p.get('type','?')}] `{p.get('name','?')}` — `{p.get('server','?')}:{p.get('port','?')}`"
-                for p in proxies[:20]
-            ]
-            if len(proxies) > 20:
-                lines.append(f"  _... và {len(proxies)-20} proxy khác_")
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("🏓 Ping nodes", callback_data=f"sub_ping_{idx}"),
-                InlineKeyboardButton("🔄 Cập nhật",  callback_data=f"sub_update_{idx}"),
-            ],[InlineKeyboardButton("🔙 Danh sách", callback_data="menu_sub")]])
-            await update.message.reply_text(
-                f"📋 *{s['name']}*\nProxy: `{len(proxies)}` | Cập nhật: `{s.get('updated_at','?')}`\n\n" + "\n".join(lines),
-                parse_mode="Markdown", reply_markup=kb,
-            )
-        except Exception:
-            await update.message.reply_text("❌ Cú pháp: `/sub view <số thứ tự>`", parse_mode="Markdown")
-
-    # --- PING ---
-    elif cmd_str == "ping":
-        subs = user_subs.get(uid, [])
-        try:
-            idx = int(args[1]) - 1
-            s = subs[idx]
-            await _exec_ping_nodes(update.message, s, idx)
-        except Exception:
-            await update.message.reply_text("❌ Cú pháp: `/sub ping <số thứ tự>`", parse_mode="Markdown")
-
-    # --- UPDATE ---
-    elif cmd_str == "update":
-        subs = user_subs.get(uid, [])
-        try:
-            idx = int(args[1]) - 1
-            s = subs[idx]
-            msg = await update.message.reply_text(f"🔄 Đang cập nhật `{s['name']}`...", parse_mode="Markdown")
-            updated = await asyncio.get_event_loop().run_in_executor(None, fetch_sub_fresh, s)
-            subs[idx] = updated
-            await msg.edit_text(
-                f"✅ *Đã cập nhật: {updated['name']}*\n"
-                f"Tổng: `{len(updated.get('proxies',[]))}` proxy\n"
-                f"Lúc: `{updated.get('updated_at','?')}`",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📋 Danh sách sub", callback_data="menu_sub")]]),
-            )
-        except Exception:
-            await update.message.reply_text("❌ Cú pháp: `/sub update <số thứ tự>`", parse_mode="Markdown")
-
-    else:
-        await update.message.reply_text(
-            "🔗 *Sub Link - Hướng dẫn:*\n"
-            "`/sub` — Xem danh sách\n"
-            "`/sub add Tên | URL` — Thêm sub\n"
-            "`/sub view 1` — Xem proxy sub #1\n"
-            "`/sub ping 1` — Ping tất cả node sub #1\n"
-            "`/sub update 1` — Cập nhật sub #1\n"
-            "`/sub del 1` — Xóa sub #1",
-            parse_mode="Markdown",
-        )
-
-
 async def _show_sub_menu(message, uid: int):
     subs = user_subs.get(uid, [])
-    text = f"🔗 *QUẢN LÝ SUB LINK VPN*\n\nBạn có `{len(subs)}/{MAX_SUBS}` sub link."
+    text = f"🔗 *DANH SÁCH SUB LINK*\n\nBạn có `{len(subs)}/{MAX_SUBS}` sub link.\n"
     if subs:
-        text += "\n_Server fetch mới nhất mỗi khi bấm Ping / View_ ✅\n"
+        text += "_Fetch mới nhất mỗi khi /view hoặc /ping_ ✅\n\n"
         for i, s in enumerate(subs, 1):
-            text += f"\n  `{i}.` *{s['name']}* — `{len(s.get('proxies',[]))}` proxy | `{s.get('updated_at','?')}`"
+            text += f"  `{i}.` *{s['name']}* — `{len(s.get('proxies',[]))}` proxy | `{s.get('updated_at','?')}`\n"
     else:
-        text += "\n\nChưa có sub link.\nDùng nút bên dưới hoặc: `/sub add Tên | URL`"
+        text += "\nChưa có sub link.\nDùng: `/new <tên> <url>`"
     await message.reply_text(text, parse_mode="Markdown", reply_markup=kb_sub_list(uid))
 
 
 async def _exec_ping_nodes(message, sub: dict, sub_idx: int):
-    # Luôn fetch lại sub trước khi ping để có server mới nhất
-    msg = await message.reply_text("🔄 Đang fetch danh sách server mới nhất...", parse_mode="Markdown")
-    loop = asyncio.get_event_loop()
-    sub = await loop.run_in_executor(None, fetch_sub_fresh, sub)
+    # Luôn fetch lại sub trước khi ping
+    msg = await message.reply_text(
+        f"🔄 Đang fetch sub *{sub['name']}* để lấy server mới nhất...", parse_mode="Markdown"
+    )
+    loop    = asyncio.get_event_loop()
+    sub     = await loop.run_in_executor(None, fetch_sub_fresh, sub)
     # Cập nhật lại vào user_subs
-    for uid, subs in user_subs.items():
+    for uid_key, subs in user_subs.items():
         if sub_idx < len(subs) and subs[sub_idx].get("url") == sub.get("url"):
             subs[sub_idx] = sub
             break
     proxies = sub.get("proxies", [])
-    total = len(proxies)
-    if not proxies or (proxies and "error" in proxies[0]):
-        await msg.edit_text("❌ Không lấy được proxy từ sub link này.")
+    total   = len(proxies)
+    if not proxies or "error" in proxies[0]:
+        await msg.edit_text(f"❌ Lỗi fetch sub: `{proxies[0].get('error','?')}`", parse_mode="Markdown")
         return
     await msg.edit_text(
         f"🏓 Đang ping `{min(total, MAX_NODES_PING)}/{total}` node của *{sub['name']}*...\n_Vui lòng chờ..._",
         parse_mode="Markdown",
     )
-    results = await asyncio.get_event_loop().run_in_executor(None, ping_all_nodes, proxies)
+    results = await loop.run_in_executor(None, ping_all_nodes, proxies)
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🔄 Ping lại",    callback_data=f"sub_ping_{sub_idx}"),
-        InlineKeyboardButton("🔄 Cập nhật sub", callback_data=f"sub_update_{sub_idx}"),
-    ],[InlineKeyboardButton("🔙 Danh sách",   callback_data="menu_sub")]])
+        InlineKeyboardButton("🔄 Ping lại", callback_data=f"sub_ping_{sub_idx}"),
+        InlineKeyboardButton("📋 Xem server", callback_data=f"sub_view_{sub_idx}"),
+    ]])
     await msg.edit_text(
         fmt_ping_nodes(sub["name"], results, total),
         parse_mode="Markdown", reply_markup=kb,
@@ -660,25 +748,18 @@ async def _exec_ping_nodes(message, sub: dict, sub_idx: int):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "📖 *HƯỚNG DẪN SỬ DỤNG*\n\n"
-        "*Lệnh chính:*\n"
-        "• `/start` — Menu chính\n"
+        "*Sub Link:*\n"
+        "• `/new <tên> <url>` — Thêm sub link\n"
+        "• `/remove <số>` — Xóa sub link\n"
+        "• `/view <số>` — Xem server trong sub (fetch mới)\n"
+        "• `/ping <số>` — Ping tất cả node sub (fetch mới)\n\n"
+        "*Công cụ:*\n"
         "• `/check` — Kiểm tra VPN & GFW\n"
         "• `/ip` — Xem IP công khai\n"
-        "• `/ping <host>` — Ping host/IP\n"
-        "• `/speed` — Đo tốc độ mạng\n"
-        "• `/sub` — Quản lý sub link VPN\n\n"
-        "*Sub Link:*\n"
-        "• `/sub add Tên | URL` — Thêm\n"
-        "• `/sub view 1` — Xem proxy sub #1\n"
-        "• `/sub ping 1` — Ping tất cả node sub #1\n"
-        "• `/sub update 1` — Cập nhật sub #1\n"
-        "• `/sub del 1` — Xóa sub #1\n"
-        "• Server luôn được fetch mới nhất khi dùng lệnh Ping / View\n\n"
-        "*Hỗ trợ:* VMess · VLESS · Shadowsocks · Trojan\n\n"
-        "*Đọc kết quả:*\n"
-        "🟢 <150ms  🟡 150–300ms  🔴 >300ms\n"
-        "✅ = kết nối được | ❌ = bị chặn/chết\n\n"
-        "⚠️ _Bot kiểm tra từ server chạy bot_"
+        "• `/speed` — Đo tốc độ mạng\n\n"
+        "💡 _/view và /ping luôn tải lại link sub để có server mới nhất_\n\n"
+        "*Hỗ trợ:* Clash YAML · VMess · VLESS · SS · Trojan · Hysteria2 · TUIC\n\n"
+        "🟢 <150ms  🟡 150–300ms  🔴 >300ms"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -887,20 +968,15 @@ def main():
     print("🤖 Bot đang khởi động...")
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # ConversationHandler cho /ping
-    ping_conv = ConversationHandler(
-        entry_points=[CommandHandler("ping", cmd_ping_entry)],
-        states={WAITING_PING_HOST: [MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_ping_text)]},
-        fallbacks=[CommandHandler("cancel", cmd_cancel)],
-    )
-
-    app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("check",  cmd_check))
-    app.add_handler(CommandHandler("ip",     cmd_ip))
-    app.add_handler(CommandHandler("speed",  cmd_speed))
-    app.add_handler(CommandHandler("sub",    cmd_sub))
-    app.add_handler(CommandHandler("help",   cmd_help))
-    app.add_handler(ping_conv)
+    app.add_handler(CommandHandler("start",   cmd_start))
+    app.add_handler(CommandHandler("new",     cmd_new))
+    app.add_handler(CommandHandler("remove",  cmd_remove))
+    app.add_handler(CommandHandler("view",    cmd_view))
+    app.add_handler(CommandHandler("ping",    cmd_ping_sub))
+    app.add_handler(CommandHandler("check",   cmd_check))
+    app.add_handler(CommandHandler("ip",      cmd_ip))
+    app.add_handler(CommandHandler("speed",   cmd_speed))
+    app.add_handler(CommandHandler("help",    cmd_help))
     app.add_handler(CallbackQueryHandler(button_handler))
 
     print("✅ Bot đang chạy! Gửi /start trên Telegram để bắt đầu.")
