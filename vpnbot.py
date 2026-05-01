@@ -32,8 +32,8 @@ from telegram.ext import (
 )
 
 # ===================== CẤU HÌNH =====================
-BOT_TOKEN  = "YOUR_BOT_TOKEN_HERE"   # 👈 Thay bằng token của bạn
-ADMIN_IDS  = []                       # 👈 Thêm Telegram user_id admin (vd: [123456789])
+BOT_TOKEN  = "8734023025:AAEbSc8oiMY5t-P0cHTVjy-zYHp1hmql_40"   # 👈 Thay bằng token của bạn
+ADMIN_IDS  = [6727174487]                       # 👈 Thêm Telegram user_id admin (vd: [123456789])
 TIMEOUT    = 6                        # giây cho mỗi request kiểm tra
 MAX_SUBS   = 10                       # tối đa số link sub mỗi user lưu
 # ====================================================
