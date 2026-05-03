@@ -34,8 +34,8 @@ from telegram.ext import (
 )
 
 # ===================== CẤU HÌNH =====================
-BOT_TOKEN            = "8734023025:AAEbSc8oiMY5t-P0cHTVjy-zYHp1hmql_40"
-ADMIN_IDS            = [6727174487]
+BOT_TOKEN            = ""
+ADMIN_IDS            = []
 TIMEOUT              = 6       # giây timeout kiểm tra host
 MAX_SUBS             = 10      # tối đa sub link mỗi user
 PING_COUNT           = 4       # số lần ping mỗi node
